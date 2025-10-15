@@ -1,0 +1,1 @@
+"""BetaBae minimal package initializer."""

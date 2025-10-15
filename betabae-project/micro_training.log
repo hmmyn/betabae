@@ -1,0 +1,18 @@
+nohup: ignoring input
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/home/abhaydjoshi/betabae-project/betabae/micro_train.py", line 287, in <module>
+    agent, rewards, lengths, losses = train_micro_betabae(
+  File "/home/abhaydjoshi/betabae-project/betabae/micro_train.py", line 171, in train_micro_betabae
+    agent.learn(hist_list, action, next_obs, reward)
+  File "/home/abhaydjoshi/betabae-project/betabae/micro_core.py", line 371, in learn
+    if p.grad > max_grad_norm:
+TypeError: '>' not supported between instances of 'Value' and 'float'
+Starting MicroBetaBae training on CartPole-v1
+Episodes: 1000000
+Model parameters: 4646
+Search enabled: True
+Reflection enabled: True

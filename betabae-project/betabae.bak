@@ -1,0 +1,241 @@
+betabae-project/
+├── betabae/
+│ ├── __init__.py
+│ ├── core.py
+│ ├── logger.py
+│ ├── train.py
+│ └── visualize/
+│ ├── __init__.py
+│ ├── attention.py
+│ └── embeddings.py
+├── logs/
+└── outputs/
+
+betabae/__init__.py
+
+# Empty file to make betabae a module
+
+betabae/core.py
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SimpleTransformer(nn.Module):
+    def __init__(self, input_dim, d_model):
+        super().__init__()
+        self.embed = nn.Linear(input_dim, d_model)
+        self.attn = nn.MultiheadAttention(d_model, num_heads=1, batch_first=True)
+        self.last_hidden = None
+
+    def forward(self, x):
+        x = self.embed(x)
+        attn_output, attn_weights = self.attn(x, x, x)
+        self.last_hidden = x[:, -1, :]
+        return x, attn_weights
+
+class MinimalAgent(nn.Module):
+    def __init__(self, obs_dim, action_dim, d_model=32, seq_len=8):
+        super().__init__()
+        self.seq_len = seq_len
+        self.net = SimpleTransformer(obs_dim + action_dim, d_model)
+        self.predict = nn.Linear(d_model, obs_dim)
+        self.act = nn.Linear(d_model, action_dim)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+
+    def forward(self, history):
+        h, attn = self.net(history)
+        pred = self.predict(h[:, -1])
+        logits = self.act(h[:, -1])
+        return pred, logits, attn
+
+    def loss(self, pred, actual, logits, action):
+        surprise = F.mse_loss(pred, actual)
+        value = -surprise.detach()
+        log_probs = F.log_softmax(logits, dim=-1).gather(1, action.unsqueeze(1)).squeeze(1)
+        policy_loss = -(value * log_probs)
+        return surprise + policy_loss.mean()
+betabae/logger.py
+
+from pathlib import Path
+import numpy as np
+
+class EvolutionLogger:
+    def __init__(self, save_dir):
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(exist_ok=True, parents=True)
+        self.attention = []
+        self.hidden = []
+        self.pred_error = []
+        self.actions = []
+
+    def log_step(self, attn, hidden, error, action):
+        self.attention.append(attn.cpu().numpy())
+        self.hidden.append(hidden.cpu().numpy())
+        self.pred_error.append(error)
+        self.actions.append(action)
+
+    def save(self, episode):
+        np.savez_compressed(
+            self.save_dir / f'episode_{episode:05d}.npz',
+            attention=np.array(self.attention),
+            hidden=np.array(self.hidden),
+            pred_error=np.array(self.pred_error),
+            actions=np.array(self.actions)
+        )
+        self.attention = []
+        self.hidden = []
+        self.pred_error = []
+        self.actions = []
+betabae/train.py
+
+import torch
+import torch.nn.functional as F
+from collections import deque
+import numpy as np
+import gym
+from betabae.core import MinimalAgent
+from betabae.logger import EvolutionLogger
+
+def train(agent, env, logger, n_episodes=100, max_steps=100):
+    history = deque(maxlen=agent.seq_len)
+
+    for episode in range(n_episodes):
+        obs = env.reset()
+        history.clear()
+        for _ in range(agent.seq_len):
+            history.append(np.concatenate([obs, np.zeros(env.action_space.n)]))
+
+        done = False
+        step = 0
+        while not done and step < max_steps:
+            hist_tensor = torch.from_numpy(np.array(history)).float().unsqueeze(0)
+            pred, logits, attn = agent(hist_tensor)
+
+            probs = F.softmax(logits, dim=-1)
+            action = torch.multinomial(probs, 1).item()
+            next_obs, reward, done, _ = env.step(action)
+
+            actual = torch.from_numpy(next_obs).float().unsqueeze(0)
+            action_tensor = torch.LongTensor([action])
+
+            loss = agent.loss(pred, actual, logits, action_tensor)
+
+            agent.optimizer.zero_grad()
+            loss.backward()
+            agent.optimizer.step()
+
+            logger.log_step(
+                attn=attn,
+                hidden=agent.net.last_hidden,
+                error=loss.item(),
+                action=action
+            )
+
+            action_onehot = np.zeros(env.action_space.n)
+            action_onehot[action] = 1.0
+            history.append(np.concatenate([next_obs, action_onehot]))
+
+            step += 1
+
+        logger.save(episode)
+        if episode % 10 == 0:
+            print(f"Episode {episode}/{n_episodes}")
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--env', default='CartPole-v1')
+    parser.add_argument('--episodes', type=int, default=100)
+    args = parser.parse_args()
+
+    env = gym.make(args.env)
+    obs_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+    agent = MinimalAgent(obs_dim, action_dim)
+    logger = EvolutionLogger('logs/run_001')
+    train(agent, env, logger, n_episodes=args.episodes)
+betabae/visualize/__init__.py
+
+# Empty file to make visualize a submodule
+
+betabae/visualize/attention.py
+
+import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+import imageio
+
+def create_attention_video(log_dir: Path, output_path: Path):
+    episodes = sorted(log_dir.glob('episode_*.npz'))
+    fig, ax = plt.subplots(figsize=(6, 6))
+    frames = []
+
+    for ep_file in episodes:
+        data = np.load(ep_file)
+        attn = data['attention']  # (steps, 1, 1, T, T)
+        attn_matrix = attn[-1, 0, 0]  # Last step, first head
+
+        ax.clear()
+        im = ax.imshow(attn_matrix, cmap='viridis', vmin=0, vmax=1)
+        ax.set_title(f'Episode {ep_file.stem.split('_')[1]}')
+        ax.set_xlabel('Past Token')
+        ax.set_ylabel('Current Token')
+
+        fig.canvas.draw()
+        frame = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        frame = frame.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        frames.append(frame)
+
+    imageio.mimsave(output_path, frames, fps=5)
+    print(f"Saved video: {output_path}")
+
+if __name__ == '__main__':
+    import sys
+    log_dir = Path(sys.argv[1])
+    output_path = Path(sys.argv[2])
+    create_attention_video(log_dir, output_path)
+betabae/visualize/embeddings.py
+
+import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+
+def plot_embedding_evolution(log_dir: Path, output_path: Path):
+    episodes = sorted(log_dir.glob('episode_*.npz'))
+    all_hidden = []
+    episode_labels = []
+
+    for i, ep_file in enumerate(episodes):
+        data = np.load(ep_file)
+        hidden = data['hidden']  # (steps, 1, d_model)
+        hidden = np.squeeze(hidden)  # (steps, d_model)
+        all_hidden.append(hidden)
+        episode_labels.extend([i] * len(hidden))
+
+    all_hidden = np.vstack(all_hidden)
+    pca = PCA(n_components=2)
+    coords = pca.fit_transform(all_hidden)
+
+    plt.figure(figsize=(8, 8))
+    scatter = plt.scatter(
+        coords[:, 0],
+        coords[:, 1],
+        c=episode_labels,
+        cmap='viridis',
+        s=2,
+        alpha=0.5
+    )
+    plt.colorbar(scatter, label='Episode')
+    plt.title('Representation Space Evolution')
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.savefig(output_path, dpi=100)
+    print(f"Saved plot: {output_path}")
+
+if __name__ == '__main__':
+    import sys
+    log_dir = Path(sys.argv[1])
+    output_path = Path(sys.argv[2])
+    plot_embedding_evolution(log_dir, output_path)
